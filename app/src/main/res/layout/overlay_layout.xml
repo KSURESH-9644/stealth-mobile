@@ -49,6 +49,16 @@
                 android:textSize="11sp"
                 android:textStyle="bold" />
 
+            <!-- డైనమిక్ యాప్ వెర్షన్ -->
+            <TextView
+                android:id="@+id/tvAppVersion"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:text="v--"
+                android:textColor="#64748B"
+                android:textSize="10sp" />
+
             <!-- సైజ్ మార్చే టోగుల్ (Small / Medium / Large) -->
             <TextView
                 android:id="@+id/btnResize"
@@ -82,7 +92,7 @@
                 android:textStyle="bold" />
         </LinearLayout>
 
-        <!-- మోడ్ కంట్రోల్ బటన్లు: ఆటో వాయిస్ vs మాన్యువల్ వాయిస్ -->
+        <!-- మోడ్ కంట్రోల్ బటన్లు -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

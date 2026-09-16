@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -65,6 +64,9 @@ class OverlayService : Service() {
     @Volatile
     private var isAutoStreaming = false
 
+    private var lastSpokenTime = 0L
+    private var speechDetectedInCurrentChunk = false
+
     private var resumeText = ""
     private var customContext = ""
     private var currentSizeLevel = 1
@@ -88,48 +90,11 @@ class OverlayService : Service() {
     }
 
     private fun setupAudioRouting() {
-        try {
-            if (audioManager.mode == AudioManager.MODE_NORMAL) {
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val bluetoothDevice = audioManager.availableCommunicationDevices.firstOrNull {
-                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                            it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
-                }
-                if (bluetoothDevice != null) {
-                    audioManager.setCommunicationDevice(bluetoothDevice)
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                if (!audioManager.isBluetoothScoOn && audioManager.isBluetoothScoAvailableOffCall) {
-                    audioManager.startBluetoothSco()
-                    audioManager.isBluetoothScoOn = true
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Audio routing setup error: ${e.message}")
-        }
+        // App does not hijack system audio routing; handles Speaker/Headset naturally
     }
 
     private fun resetAudioRouting() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                audioManager.clearCommunicationDevice()
-            } else {
-                @Suppress("DEPRECATION")
-                if (audioManager.isBluetoothScoOn) {
-                    audioManager.isBluetoothScoOn = false
-                    audioManager.stopBluetoothSco()
-                }
-            }
-            if (audioManager.mode == AudioManager.MODE_IN_COMMUNICATION) {
-                audioManager.mode = AudioManager.MODE_NORMAL
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Audio routing reset error: ${e.message}")
-        }
+        // No-op
     }
 
     private fun startForegroundServiceNotification() {
@@ -175,6 +140,7 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
+        // Screen Bottom Placement
         params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -185,9 +151,9 @@ class OverlayService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 40
-            y = 120
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            x = 0
+            y = 80 // Safe margin from navigation bar
         }
 
         windowManager.addView(overlayView, params)
@@ -200,6 +166,16 @@ class OverlayService : Service() {
         val btnResize = overlayView.findViewById<TextView>(R.id.btnResize)
         val btnAuto = overlayView.findViewById<Button>(R.id.btnAutoCapture)
         val btnManual = overlayView.findViewById<Button>(R.id.btnManualCapture)
+        val tvAppVersion = overlayView.findViewById<TextView>(R.id.tvAppVersion)
+
+        // Read Dynamic App Version
+        try {
+            val packageInfo = packageManager.getPackageInfo(packageName, 0)
+            val currentVersion = packageInfo.versionName ?: "1.0.1"
+            tvAppVersion?.text = "v$currentVersion"
+        } catch (_: Exception) {
+            tvAppVersion?.text = "v1.0.1"
+        }
 
         btnClose.setOnClickListener { stopSelf() }
 
@@ -232,11 +208,12 @@ class OverlayService : Service() {
             if (isAutoStreaming) {
                 isAutoStreaming = false
                 autoStreamingJob?.cancel()
+                if (isRecordingRaw) stopHardwareRecording(sendAudio = false)
                 btnAuto.text = "Auto Stream"
                 btnAuto.setBackgroundColor(Color.parseColor("#1E293B"))
                 updateStatus("🟢 Ready")
             } else {
-                if (isRecordingRaw) stopHardwareRecordingAndSend()
+                if (isRecordingRaw) stopHardwareRecording(sendAudio = false)
                 isAutoStreaming = true
                 btnAuto.text = "Streaming..."
                 btnAuto.setBackgroundColor(Color.parseColor("#15803D"))
@@ -246,7 +223,7 @@ class OverlayService : Service() {
 
         btnManual.setOnClickListener {
             if (isRecordingRaw) {
-                stopHardwareRecordingAndSend()
+                stopHardwareRecording(sendAudio = true)
                 btnManual.text = "Tap to Record"
                 btnManual.setBackgroundColor(Color.parseColor("#0284C7"))
             } else {
@@ -290,7 +267,7 @@ class OverlayService : Service() {
                     if (kotlin.math.abs(diffX) > 10 || kotlin.math.abs(diffY) > 10) {
                         isClick = false
                         params.x = initialX + diffX
-                        params.y = initialY + diffY
+                        params.y = initialY - diffY // Adjust for Bottom gravity
                         windowManager.updateViewLayout(overlayView, params)
                     }
                     true
@@ -402,30 +379,42 @@ class OverlayService : Service() {
         }
 
         try {
-            // కాల్ సమయంలో సిస్టమ్ మైక్ మ్యూట్ చేయకుండా VOICE_RECOGNITION వాడుతున్నాం
-            var recorder: AudioRecord? = AudioRecord(
+            val audioSources = intArrayOf(
                 MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                minBufferSize * 2
+                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION
             )
 
-            if (recorder?.state != AudioRecord.STATE_INITIALIZED) {
-                recorder?.release()
-                recorder = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRate,
-                    channelConfig,
-                    audioFormat,
-                    minBufferSize * 2
-                )
+            var recorder: AudioRecord? = null
+            for (source in audioSources) {
+                try {
+                    val testRecorder = AudioRecord(
+                        source,
+                        sampleRate,
+                        channelConfig,
+                        audioFormat,
+                        minBufferSize * 4
+                    )
+                    if (testRecorder.state == AudioRecord.STATE_INITIALIZED) {
+                        recorder = testRecorder
+                        Log.d(TAG, "Initialized AudioRecord with source: $source")
+                        break
+                    } else {
+                        testRecorder.release()
+                    }
+                } catch (_: Exception) {}
+            }
+
+            if (recorder == null || recorder.state != AudioRecord.STATE_INITIALIZED) {
+                updateStatus("❌ Mic In Use")
+                return
             }
 
             audioRecord = recorder
             rawAudioStream = ByteArrayOutputStream()
-            recorder?.startRecording()
+            recorder.startRecording()
             isRecordingRaw = true
+            speechDetectedInCurrentChunk = false
             updateStatus("🔴 Listening...")
 
             recordingJob = serviceScope.launch {
@@ -434,16 +423,41 @@ class OverlayService : Service() {
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                     if (read > 0) {
                         rawAudioStream?.write(buffer, 0, read)
+
+                        // Amplitude check for speech
+                        var maxSample = 0
+                        for (i in 0 until read step 2) {
+                            val sample = Math.abs((buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8))
+                            if (sample > maxSample) maxSample = sample
+                        }
+
+                        // Speech energy threshold
+                        if (maxSample > 800) {
+                            speechDetectedInCurrentChunk = true
+                            lastSpokenTime = System.currentTimeMillis()
+                        }
+
+                        // Silence detected for 1.5s after speech (Wait for full question)
+                        val isSilenceAfterSpeech = speechDetectedInCurrentChunk &&
+                                (System.currentTimeMillis() - lastSpokenTime > 1500)
+
+                        // 18 seconds max duration cap
+                        val streamTooLong = (rawAudioStream?.size() ?: 0) > (sampleRate * 2 * 18)
+
+                        if (isSilenceAfterSpeech || streamTooLong) {
+                            stopHardwareRecording(sendAudio = true)
+                            break
+                        }
                     }
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Recording init error: ${e.message}")
-            stopHardwareRecordingAndSend()
+            stopHardwareRecording(sendAudio = false)
         }
     }
 
-    private fun stopHardwareRecordingAndSend() {
+    private fun stopHardwareRecording(sendAudio: Boolean) {
         isRecordingRaw = false
         recordingJob?.cancel()
         recordingJob = null
@@ -457,10 +471,12 @@ class OverlayService : Service() {
         val rawBytes = rawAudioStream?.toByteArray() ?: ByteArray(0)
         rawAudioStream = null
 
-        if (rawBytes.isNotEmpty()) {
+        if (sendAudio && rawBytes.isNotEmpty() && speechDetectedInCurrentChunk) {
             updateStatus("⚡ Thinking...")
             val wavBytes = addWavHeader(rawBytes, 16000, 1, 16)
             sendAudioBytes(wavBytes)
+        } else if (isAutoStreaming) {
+            updateStatus("🟢 Listening...")
         }
     }
 
@@ -468,12 +484,10 @@ class OverlayService : Service() {
         autoStreamingJob?.cancel()
         autoStreamingJob = serviceScope.launch {
             while (isActive && isAutoStreaming) {
-                startHardwareRecording()
-                delay(4000)
-                if (isRecordingRaw) {
-                    stopHardwareRecordingAndSend()
+                if (!isRecordingRaw) {
+                    startHardwareRecording()
                 }
-                delay(600)
+                delay(400)
             }
         }
     }
