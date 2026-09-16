@@ -19,7 +19,12 @@ import com.stealth.assistant.databinding.ActivityMainBinding
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private var resumeTextContent: String = ""
+
+    companion object {
+        var sharedResumeText: String = ""
+        var sharedCustomContext: String = ""
+        var isPdfDocument: Boolean = false
+    }
 
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let { handleSelectedFile(it) }
@@ -32,7 +37,7 @@ class MainActivity : AppCompatActivity() {
 
         checkBasicPermissions()
 
-        // 1. Resume ఫైల్ పికర్
+        // 1. Resume ఫైల్ పికర్ (PDF & Docs)
         binding.btnPickResume.setOnClickListener {
             filePickerLauncher.launch("*/*")
         }
@@ -45,7 +50,9 @@ class MainActivity : AppCompatActivity() {
         // 3. GitHub Releases ద్వారా యాప్ అప్‌డేట్
         binding.btnUpdateApp.setOnClickListener {
             AppUpdater.checkForUpdate(this) { statusMessage ->
-                Toast.makeText(this, statusMessage, Toast.LENGTH_SHORT).show()
+                runOnUiThread {
+                    Toast.makeText(this, statusMessage, Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
@@ -63,8 +70,9 @@ class MainActivity : AppCompatActivity() {
 
             contentResolver.openInputStream(uri)?.use { inputStream ->
                 val bytes = inputStream.readBytes()
-                // PDF లేదా డాక్యుమెంట్ ఫైల్స్‌ను కరప్ట్ అవ్వకుండా Base64 రూపంలో సర్వర్‌కు పంపుతాం
-                resumeTextContent = if (fileName.endsWith(".pdf", ignoreCase = true)) {
+                isPdfDocument = fileName.endsWith(".pdf", ignoreCase = true)
+
+                sharedResumeText = if (isPdfDocument) {
                     Base64.encodeToString(bytes, Base64.NO_WRAP)
                 } else {
                     String(bytes, Charsets.UTF_8)
@@ -101,6 +109,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkOverlayAndStartService() {
+        // 1. ఆండ్రాయిడ్ 14+ క్రాష్ అవ్వకుండా మైక్రోఫోన్ పర్మిషన్ చెక్
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Please grant Microphone permission first", Toast.LENGTH_SHORT).show()
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 102)
+            return
+        }
+
+        // 2. Overlay Permission Check
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Enable 'Display over other apps' permission", Toast.LENGTH_LONG).show()
             val intent = Intent(
@@ -111,12 +127,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val customContext = binding.etCustomContext.text.toString().trim()
+        sharedCustomContext = binding.etCustomContext.text.toString().trim()
 
-        val serviceIntent = Intent(this, OverlayService::class.java).apply {
-            putExtra("EXTRA_RESUME_TEXT", resumeTextContent)
-            putExtra("EXTRA_CUSTOM_CONTEXT", customContext)
-        }
+        val serviceIntent = Intent(this, OverlayService::class.java)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)

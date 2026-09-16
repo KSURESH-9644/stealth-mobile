@@ -2,31 +2,28 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- నెట్‌వర్క్ & ఇంటర్నెట్ పర్మిషన్లు (WebSocket కమ్యూనికేషన్ కోసం) -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- మైక్రోఫోన్ ఆడియో రికార్డింగ్ పర్మిషన్ -->
+    <!-- Microphone & Audio Tuning -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
-    <!-- ఇతర యాప్స్‌పై ఫ్లోట్ అవ్వడానికి Overlay పర్మిషన్ -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-
-    <!-- బ్యాక్‌గ్రౌండ్‌లో సర్వీస్ రన్ అవ్వడానికి Foreground Service పర్మిషన్లు -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-    <!-- బ్లూటూత్ పర్మిషన్లు (Android 11 & అంతకంటే పాతవి, Android 12+ కోసం) -->
+    <!-- Overlay & Foreground Service -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Bluetooth for Headsets -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- కాల్ స్టేట్ ట్రాకింగ్ పర్మిషన్లు -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-    <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -52,7 +49,8 @@
             android:name=".OverlayService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|dataSync" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -63,5 +61,4 @@
                 android:resource="@xml/file_paths" />
         </provider>
     </application>
-
 </manifest>

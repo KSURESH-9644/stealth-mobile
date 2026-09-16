@@ -1,126 +1,146 @@
 package com.stealth.assistant
 
-import android.app.DownloadManager
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
-import androidx.core.content.ContextCompat
+import android.util.Log
 import androidx.core.content.FileProvider
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 
 object AppUpdater {
-    // నీ GitHub యూజర్‌నేమ్ మరియు ఆండ్రాయిడ్ రిపోజిటరీ పేరు
-    //private const val GITHUB_REPO = "KSURESH-9644/stealth-assistant-app"
+
+    private const val TAG = "AppUpdater"
     private const val GITHUB_REPO = "KSURESH-9644/stealth-assistant-mobile-app"
-    private const val CURRENT_VERSION = "v1.0.0"
+    private val client = OkHttpClient()
 
     fun checkForUpdate(context: Context, onStatusUpdate: (String) -> Unit) {
-        onStatusUpdate("Checking for updates...")
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val client = OkHttpClient()
+                withContext(Dispatchers.Main) { onStatusUpdate("Checking for updates...") }
+
+                val currentVersion = getCurrentVersion(context)
+                val url = "https://api.github.com/repos/$GITHUB_REPO/releases/latest"
                 val request = Request.Builder()
-                    .url("https://api.github.com/repos/$GITHUB_REPO/releases/latest")
-                    .header("User-Agent", "StealthApp")
+                    .url(url)
+                    .header("Accept", "application/vnd.github.v3+json")
                     .build()
 
                 val response = client.newCall(request).execute()
                 if (!response.isSuccessful) {
-                    withContext(Dispatchers.Main) {
-                        onStatusUpdate("No release found or repo private (${response.code})")
-                    }
+                    withContext(Dispatchers.Main) { onStatusUpdate("No updates found on GitHub") }
                     return@launch
                 }
 
-                val responseBody = response.body?.string() ?: ""
-                val json = JSONObject(responseBody)
-                val latestTag = json.optString("tag_name", "")
+                val jsonData = response.body?.string() ?: return@launch
+                val json = JSONObject(jsonData)
+                val latestTag = json.getString("tag_name")
 
-                if (latestTag.isNotEmpty() && latestTag != CURRENT_VERSION) {
-                    val assets = json.optJSONArray("assets")
+                if (isNewerVersion(latestTag, currentVersion)) {
+                    val assets = json.getJSONArray("assets")
                     var downloadUrl = ""
 
-                    if (assets != null) {
-                        for (i in 0 until assets.length()) {
-                            val asset = assets.getJSONObject(i)
-                            val name = asset.optString("name", "")
-                            if (name.endsWith(".apk", ignoreCase = true)) {
-                                downloadUrl = asset.optString("browser_download_url", "")
-                                break
-                            }
+                    for (i in 0 until assets.length()) {
+                        val asset = assets.getJSONObject(i)
+                        if (asset.getString("name").endsWith(".apk")) {
+                            downloadUrl = asset.getString("browser_download_url")
+                            break
                         }
                     }
 
                     if (downloadUrl.isNotEmpty()) {
-                        withContext(Dispatchers.Main) {
-                            onStatusUpdate("Downloading update ($latestTag)...")
-                            downloadAndInstallApk(context, downloadUrl)
-                        }
+                        withContext(Dispatchers.Main) { onStatusUpdate("Downloading update $latestTag...") }
+                        downloadAndInstallApk(context, downloadUrl, onStatusUpdate)
                     } else {
-                        withContext(Dispatchers.Main) { onStatusUpdate("No APK file found in release") }
+                        withContext(Dispatchers.Main) { onStatusUpdate("Update found, but no APK attached") }
                     }
                 } else {
-                    withContext(Dispatchers.Main) { onStatusUpdate("App is already up-to-date ($CURRENT_VERSION)") }
+                    withContext(Dispatchers.Main) { onStatusUpdate("You are on the latest version ($currentVersion)") }
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Update check failed: ${e.message}")
+                withContext(Dispatchers.Main) { onStatusUpdate("Update check failed: ${e.message}") }
+            }
+        }
+    }
+
+    private fun getCurrentVersion(context: Context): String {
+        return try {
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(context.packageName, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            }
+            "v${packageInfo.versionName}"
+        } catch (e: Exception) {
+            "v0.0.0"
+        }
+    }
+
+    // Semantic Version Comparison (ఉదా: v1.0.10 > v1.0.9)
+    private fun isNewerVersion(latest: String, current: String): Boolean {
+        try {
+            val l = latest.removePrefix("v").split(".").map { it.toIntOrNull() ?: 0 }
+            val c = current.removePrefix("v").split(".").map { it.toIntOrNull() ?: 0 }
+
+            val maxLen = maxOf(l.size, c.size)
+            for (i in 0 until maxLen) {
+                val lPart = l.getOrElse(i) { 0 }
+                val cPart = c.getOrElse(i) { 0 }
+                if (lPart > cPart) return true
+                if (lPart < cPart) return false
+            }
+        } catch (_: Exception) {}
+        return false
+    }
+
+    private suspend fun downloadAndInstallApk(context: Context, url: String, onStatusUpdate: (String) -> Unit) {
+        withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder().url(url).build()
+                val response = client.newCall(request).execute()
+
+                val destinationDir = context.getExternalFilesDir(null)
+                val apkFile = File(destinationDir, "update.apk")
+
+                response.body?.byteStream()?.use { input ->
+                    FileOutputStream(apkFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    onStatusUpdate("Download complete! Launching install...")
+                    installApk(context, apkFile)
                 }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { onStatusUpdate("Update check failed: ${e.localizedMessage}") }
+                withContext(Dispatchers.Main) { onStatusUpdate("Download failed: ${e.message}") }
             }
         }
     }
 
-    private fun downloadAndInstallApk(context: Context, apkUrl: String) {
-        val fileName = "stealth_update.apk"
-        val destination = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
-        if (destination.exists()) destination.delete()
-
-        val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val request = DownloadManager.Request(Uri.parse(apkUrl))
-            .setTitle("Stealth Copilot Update")
-            .setDescription("Downloading latest release...")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationUri(Uri.fromFile(destination))
-
-        val downloadId = downloadManager.enqueue(request)
-
-        val onComplete = object : BroadcastReceiver() {
-            override fun onReceive(ctxt: Context, intent: Intent) {
-                val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
-                if (id == downloadId) {
-                    try {
-                        context.unregisterReceiver(this)
-                    } catch (_: Exception) {}
-                    installApk(context, destination)
-                }
-            }
-        }
-
-        ContextCompat.registerReceiver(
+    private fun installApk(context: Context, apkFile: File) {
+        val apkUri: Uri = FileProvider.getUriForFile(
             context,
-            onComplete,
-            IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
-            ContextCompat.RECEIVER_EXPORTED
+            "${context.packageName}.fileprovider",
+            apkFile
         )
-    }
 
-    private fun installApk(context: Context, file: File) {
-        try {
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
+        context.startActivity(intent)
     }
 }
